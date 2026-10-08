@@ -81,7 +81,11 @@ export default function MapView({ data, hoveredPointIndex, mapType = 'Roadmap' }
 
   const primaryTrack = data?.tracks?.[0]?.points ?? [];
   const path = primaryTrack.map((p) => ({ lat: p.boat_lat, lng: p.boat_lon }));
-  const onCable = primaryTrack.map((p) => ({ lat: p.on_lat, lng: p.on_lon }));
+  // Vendor trackers do not always provide projected cable coordinates; do not
+  // draw an artificial line to (0, 0) when these fields are absent.
+  const onCable = primaryTrack
+    .filter((p) => Number.isFinite(p.on_lat) && Number.isFinite(p.on_lon) && (p.on_lat !== 0 || p.on_lon !== 0))
+    .map((p) => ({ lat: p.on_lat, lng: p.on_lon }));
   const fiber = data?.fiber_latlon ?? [];
   const ais = data?.ais_latlon ?? [];
 

@@ -1,0 +1,2 @@
+-r requirements.txt
+httpx  # FastAPI TestClient used by the regression tests

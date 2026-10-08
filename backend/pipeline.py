@@ -1,20 +1,38 @@
 from __future__ import annotations
 
+import logging
+import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 
-try:
-    from .config import CABLE_OFFSET_KM, EXCEL_FILE_PATH, GPX_FILE_PATH
-except ImportError:
-    from config import CABLE_OFFSET_KM, EXCEL_FILE_PATH, GPX_FILE_PATH
+logger = logging.getLogger(__name__)
 
 try:
-    from .vendor import cluster_track_compare as cluster_mod, db_track_compare as db_mod, plot_2d_with_ais as plot_mod
+    from .config import CABLE_OFFSET_KM, DB, EXCEL_FILE_PATH, GPX_FILE_PATH
+except ImportError:
+    from config import CABLE_OFFSET_KM, DB, EXCEL_FILE_PATH, GPX_FILE_PATH
+
+# The vendor scripts import each other by top-level module name
+# (e.g. `from cluster_track_compare import ...`), so the vendor directory
+# itself must be importable.
+_VENDOR_DIR = str(Path(__file__).resolve().parent / "vendor")
+if _VENDOR_DIR not in sys.path:
+    sys.path.insert(0, _VENDOR_DIR)
+
+cluster_mod = None
+db_mod = None
+plot_mod = None
+try:
+    try:
+        from .vendor import cluster_track_compare as cluster_mod, db_track_compare as db_mod, plot_2d_with_ais as plot_mod
+    except ImportError:
+        # Running as plain scripts (uvicorn main:app from backend/): the vendor
+        # directory is a top-level package next to this file.
+        from vendor import cluster_track_compare as cluster_mod, db_track_compare as db_mod, plot_2d_with_ais as plot_mod
 except Exception:
-    cluster_mod = None
-    db_mod = None
-    plot_mod = None
+    logger.exception("Failed to import vendor tracking modules from backend/vendor/")
 
 ALGO_MAP: Dict[str, Callable[..., Any]] = {
     "ST-DBSCAN": None,
@@ -56,26 +74,11 @@ def _as_dataframe(payload: Any) -> pd.DataFrame:
         return pd.DataFrame(payload)
     return pd.DataFrame()
 
-def _call_tracker(fn: Optional[Callable], cfg: Dict[str, Any], data: pd.DataFrame) -> Any:
-    if fn is None:
-        raise RuntimeError("Tracker function is unavailable. Place the vendor scripts into backend/vendor/")
+def _time_str(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).isoformat()
 
-    attempts = (
-        lambda: fn(data, cfg),
-        lambda: fn(cfg),
-        lambda: fn(data),
-        lambda: fn(),
-    )
-    last_error = None
-    for attempt in attempts:
-        try:
-            return attempt()
-        except TypeError as exc:
-            last_error = exc
-        except Exception as exc:
-            last_error = exc
-            break
-    raise RuntimeError(f"Tracker invocation failed: {last_error}")
 
 def _build_empty_response(request: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -109,11 +112,15 @@ def _score_track(track_df: pd.DataFrame, gpx_df: Optional[pd.DataFrame] = None) 
         mae = 0.0
         coverage = 1.0 if n else 0.0
     try:
-        if "time" in track_df.columns:
-            times = pd.to_datetime(track_df["time"], errors="coerce")
-            deltas = times.sort_values().diff().dt.total_seconds().dropna()
-            v_mean = float(deltas.mean() / 60.0) if not deltas.empty else 0.0
-            v_std = float(deltas.std() / 60.0) if len(deltas) > 1 else 0.0
+        if "t" in track_df.columns or "time" in track_df.columns:
+            time_col = "t" if "t" in track_df.columns else "time"
+            ordered = track_df.assign(_time=pd.to_datetime(track_df[time_col], errors="coerce"))
+            ordered = ordered.sort_values("_time")
+            dt = ordered["_time"].diff().dt.total_seconds()
+            distance = ordered["pos_km"].astype(float).diff() * 1000.0
+            speeds = (distance / dt).where(dt > 0).dropna()
+            v_mean = float(speeds.mean()) if not speeds.empty else 0.0
+            v_std = float(speeds.std()) if len(speeds) > 1 else 0.0
         else:
             v_mean = 0.0
             v_std = 0.0
@@ -130,7 +137,7 @@ def _score_track(track_df: pd.DataFrame, gpx_df: Optional[pd.DataFrame] = None) 
 
 def _normalize_point_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "time": str(row.get("time") or row.get("timestamp") or ""),
+        "time": _time_str(row.get("t", row.get("time", row.get("timestamp")))),
         "pos_km": _safe_float(row.get("pos_km", row.get("distance_km", 0.0)), 0.0),
         "z": _safe_float(row.get("z", row.get("zScore", 0.0)), 0.0),
         "confidence": _safe_float(row.get("confidence", row.get("conf", 0.0)), 0.0),
@@ -146,18 +153,6 @@ def _normalize_track_result(name: str, payload: Any, color: str) -> Dict[str, An
     records = []
     for _, row in df.iterrows():
         records.append(_normalize_point_row(row.to_dict()))
-    if not records:
-        records = [{
-            "time": "",
-            "pos_km": 0.0,
-            "z": 0.0,
-            "confidence": 0.0,
-            "on_lat": 0.0,
-            "on_lon": 0.0,
-            "boat_lat": 0.0,
-            "boat_lon": 0.0,
-            "h_smooth": 0.0,
-        }]
     return {
         "name": name,
         "color": color,
@@ -166,29 +161,38 @@ def _normalize_track_result(name: str, payload: Any, color: str) -> Dict[str, An
     }
 
 def _load_fiber_latlon(cable: str) -> list[dict[str, Any]]:
-    if plot_mod is None:
+    if not EXCEL_FILE_PATH or cluster_mod is None:
         return []
     try:
-        fiber = plot_mod.load_fiber(cable=cable, excel_path=EXCEL_FILE_PATH)
-        if fiber is None:
-            return []
-        if isinstance(fiber, list):
-            return [{"lat": float(item.get("lat", 0.0)), "lon": float(item.get("lon", 0.0)), "km": item.get("km"), "time": item.get("time")} for item in fiber]
-        df = _as_dataframe(fiber)
-        return [{"lat": float(row.get("lat", 0.0)), "lon": float(row.get("lon", 0.0)), "km": row.get("km"), "time": row.get("time")} for _, row in df.iterrows()]
-    except Exception:
+        raw = pd.read_excel(EXCEL_FILE_PATH, sheet_name=cable)
+        raw.columns = [str(col).strip().lower() for col in raw.columns]
+        lat_col = next(col for col in raw if "lat" in col)
+        lon_col = next(col for col in raw if "lon" in col)
+        dist_col = next(col for col in raw if "dist" in col or "cable" in col)
+        fiber = pd.DataFrame({
+            "lat": raw[lat_col].apply(cluster_mod.parse_ddm_to_dd),
+            "lon": raw[lon_col].apply(cluster_mod.parse_ddm_to_dd),
+            "km": pd.to_numeric(raw[dist_col], errors="coerce") + CABLE_OFFSET_KM[cable],
+        }).dropna().sort_values("km")
+        return fiber.to_dict("records")
+    except (FileNotFoundError, KeyError, StopIteration, ValueError):
+        logger.exception("Could not load fibre coordinates from %s", EXCEL_FILE_PATH)
         return []
 
-def _load_gpx_latlon() -> list[dict[str, Any]]:
-    if cluster_mod is None:
+def _load_gpx_latlon(cable: str) -> list[dict[str, Any]]:
+    if not GPX_FILE_PATH or not Path(GPX_FILE_PATH).is_file() or cluster_mod is None:
         return []
     try:
-        gpx_data = cluster_mod.load_gpx_continuous(GPX_FILE_PATH, EXCEL_FILE_PATH)
-        if gpx_data is None:
-            return []
+        gpx_data = cluster_mod.load_gpx_continuous(
+            GPX_FILE_PATH, EXCEL_FILE_PATH, sheet=cable
+        )
         df = _as_dataframe(gpx_data)
-        return [{"lat": float(row.get("lat", 0.0)), "lon": float(row.get("lon", 0.0)), "km": row.get("km"), "time": row.get("time")} for _, row in df.iterrows()]
+        # Vendor loader uses the s1 offset (18 km) regardless of the sheet.
+        return [{"lat": float(row["lat"]), "lon": float(row["lon"]),
+                 "km": float(row["das_km"]) + CABLE_OFFSET_KM[cable] - CABLE_OFFSET_KM["s1"],
+                 "time": _time_str(row["time"])} for _, row in df.iterrows()]
     except Exception:
+        logger.exception("Could not load AIS/GPX overlay from %s", GPX_FILE_PATH)
         return []
 
 def run_tracking(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,13 +213,19 @@ def run_tracking(request: Dict[str, Any]) -> Dict[str, Any]:
         "end_time": request.get("end_time"),
         "conf_min": float(request.get("conf_min", 0.0)),
         "overlay_ais": bool(request.get("overlay_ais", False)),
+        # Connection settings expected by db_track_compare.load_detections_from_db
+        "db_host": DB["host"],
+        "db_port": DB["port"],
+        "db_name": DB["name"],
+        "db_user": DB["user"],
+        "db_pass": DB["password"],
     }
 
     load_fn = getattr(db_mod, "load_detections_from_db", None)
     if load_fn is None:
         raise RuntimeError("load_detections_from_db is missing from backend/vendor/db_track_compare.py")
 
-    detection_df = _call_tracker(load_fn, cfg, pd.DataFrame())
+    detection_df = load_fn(cfg)
     df = _as_dataframe(detection_df)
     if df.empty:
         return _build_empty_response(request)
@@ -245,20 +255,22 @@ def run_tracking(request: Dict[str, Any]) -> Dict[str, Any]:
         fn = ALGO_MAP.get(alg)
         if fn is None:
             continue
-        raw = _call_tracker(fn, cfg, df)
-        track_results.append(_normalize_track_result(alg, raw, color_map.get(alg, "#3b82f6")))
+        raw = fn(df)
+        result = _normalize_track_result(alg, raw, color_map.get(alg, "#3b82f6"))
+        if result["points"]:
+            track_results.append(result)
 
     fibre_rows = []
     if not df.empty:
         for _, row in df.iterrows():
             fibre_rows.append({
-                "time": str(row.get("time", row.get("timestamp", ""))),
+                "time": _time_str(row.get("t", row.get("time", row.get("timestamp")))),
                 "pos_km": _safe_float(row.get("pos_km", row.get("distance_km", 0.0)), 0.0),
                 "z": _safe_float(row.get("z", row.get("zScore", 0.0)), 0.0),
-                "confidence": _safe_float(row.get("confidence", row.get("conf", 0.0)), 0.0),
+                "confidence": _safe_float(row.get("confidence", row.get("conf", row.get("z", 0.0) / 30.0)), 0.0),
             })
 
-    gpx_rows = _load_gpx_latlon() if request.get("overlay_ais", False) else []
+    gpx_rows = _load_gpx_latlon(request.get("cable", "s1")) if request.get("overlay_ais", False) else []
     ais_available = bool(gpx_rows)
 
     answer = {
