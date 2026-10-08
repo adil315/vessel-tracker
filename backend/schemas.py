@@ -16,7 +16,8 @@ class TrackRequest(BaseModel):
         "ALL",
     ] = "VITERBI-BEAM"
     chain: str = "Frequency tonality chain"
-    table: str
+    # Vendor SQL interpolates this name into a query; only allow plain identifiers.
+    table: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     min_od: float = 22000.0
     max_od: float = 75000.0
     start_time: str

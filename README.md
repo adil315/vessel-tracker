@@ -1,57 +1,58 @@
 # Vessel Tracker
 
-A full-stack tracking dashboard that wraps an existing Python detection pipeline in a FastAPI + React UI.
+A full-stack tracking dashboard wrapping the Python detection pipeline in a FastAPI + React UI.
 
-## Place the vendor scripts
+## Prerequisites
 
-Place the following files into `backend/vendor/` before running the backend:
+- Python 3.10+, Node.js 20+, npm
+- A PostgreSQL database with the detections table used by `backend/vendor/db_track_compare.py` (`id`, `odMeter`, `starttime`, `eventConfidence`, `locationDetails`, `chain`)
+- A Google Maps JavaScript API key to display the map (the plots and API work without one)
 
-- `cluster_track_compare.py`
-- `db_track_compare.py`
-- `plot_2d_with_ais.py`
+The vendor scripts and cable workbook are already included in `backend/`. The committed `backend/vessel/` virtual environment is machine-specific; **create a fresh `.venv`** instead.
 
-The app imports those modules and keeps the tracking logic intact while replacing matplotlib/folium output with Plotly and Google Maps.
-
-## Database setup
-
-Update the PostgreSQL connection settings in `backend/config.py`:
-
-```python
-DB = {
-    "host": "localhost",
-    "port": 5432,
-    "name": "seadb",
-    "user": "sea_user",
-    "password": "YOUR_PASSWORD",
-}
-```
-
-Ensure the PostgreSQL table referenced by the dashboard exists and contains the expected detections schema used by `db_track_compare.py`.
-
-## Backend
+## Start the backend
 
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+# Set these as needed for your PostgreSQL server:
+# export VESSEL_TRACKER_DB_HOST=localhost
+# export VESSEL_TRACKER_DB_PORT=5432
+# export VESSEL_TRACKER_DB_NAME=seadb
+# export VESSEL_TRACKER_DB_USER=sea_user
+# export VESSEL_TRACKER_DB_PASSWORD=your-password
+.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-## Frontend
+The API is at `http://localhost:8000`, with `/api/health` and `/api/track`. Health reports `db_reachable: false` when no database is available; tracking requires the database and matching data. The default cable workbook is `backend/S1&S2 fibre mappings2.xlsx`; override its path with `VESSEL_TRACKER_EXCEL_FILE` if needed. For an optional AIS/GPX overlay set `VESSEL_TRACKER_GPX_FILE` to a GPX file.
+
+## Start the frontend
 
 ```bash
 cd frontend
-npm install
+npm ci
 cp .env.example .env
-# replace VITE_GOOGLE_MAPS_KEY=YOUR_KEY with your Google Maps API key
+# Set VITE_GOOGLE_MAPS_KEY in .env to enable the Google map.
 npm run dev
 ```
 
-The frontend runs on http://localhost:5173 by default and posts to the FastAPI backend at `http://localhost:8000` unless you override `VITE_API_URL`.
+Open `http://localhost:5173`. By default the frontend requests relative `/api/track` and Vite proxies `/api` to `http://localhost:8000`, so there is **no cross-origin browser request**. The proxy also works when the dashboard is opened from a remote preview URL. If the backend is elsewhere, set `VITE_API_URL` to its URL **before** starting Vite; this controls both the proxy target and (if specified) the browser's direct API URL. For a cross-origin direct request, configure the backend allowlist as well:
 
-## Notes
+```bash
+export VESSEL_TRACKER_ALLOWED_ORIGINS="http://localhost:5173,https://tracker.example.com"
+```
 
-- `VITE_GOOGLE_MAPS_KEY` should be replaced in the frontend `.env` file before opening the dashboard.
-- The dashboard expects the same date-time and cable parameters used by the tracking scripts.
-- If `overlay_ais=true` but no GPX file is found, the UI shows the fallback AIS unavailable state.
+The default CORS allowlist includes `http://localhost:5173` and `http://127.0.0.1:5173` (distinct origins). Do not use `localhost` as a browser-facing API URL when the site is viewed on another machine. For production, configure your web server to reverse-proxy `/api` to FastAPI if you want to keep requests same-origin.
+
+## Checks
+
+```bash
+cd backend
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests -v
+cd ../frontend
+npm run build
+```
+
+The regression tests cover the CORS preflight, request validation, vendor dataframe/config integration, cable workbook, and response normalization without requiring a live database. Actual tracking still depends on your database and detection data; missing rows produce an empty result.

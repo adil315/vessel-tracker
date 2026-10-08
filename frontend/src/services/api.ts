@@ -1,7 +1,10 @@
 import axios from 'axios';
 import type { TrackRequest, TrackResponse } from '../types';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Empty by default: requests go to the same origin and are forwarded to the
+// backend by the Vite dev-server proxy (see vite.config.ts). Set VITE_API_URL
+// to call a backend on another origin directly (CORS must allow this origin).
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 export const api = axios.create({
   baseURL: API_URL,

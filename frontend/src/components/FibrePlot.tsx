@@ -25,13 +25,13 @@ export default function FibrePlot({ data, hoveredPointIndex, onHoverPoint }: Fib
       type: 'scattergl',
       mode: 'markers',
       x: detections.map((p) => p.time),
-      y: detections.map((p) => p.pos_km / 1000),
+      y: detections.map((p) => p.pos_km),
       marker: {
         color: detections.map((p) => p.z),
         colorscale: 'Viridis',
         showscale: true,
-        cmin: -1,
-        cmax: 1,
+        cmin: 0,
+        cmax: 30,
         size: 6,
         opacity: 0.45,
       },
@@ -44,7 +44,7 @@ export default function FibrePlot({ data, hoveredPointIndex, onHoverPoint }: Fib
     const style = algorithmStyleMap[track.name] ?? algorithmStyleMap['VITERBI-BEAM'];
     const points = track.points ?? [];
     const xs = points.map((p) => p.time);
-    const ys = points.map((p) => p.pos_km / 1000);
+    const ys = points.map((p) => p.pos_km);
     traces.push({
       type: 'scattergl',
       mode: 'lines+markers',
@@ -72,7 +72,7 @@ export default function FibrePlot({ data, hoveredPointIndex, onHoverPoint }: Fib
       mode: 'lines',
       name: 'AIS/GPX ground truth',
       x: data.ais_latlon.map((p) => p.time ?? ''),
-      y: data.ais_latlon.map((p) => (p.km ?? 0) / 1000),
+      y: data.ais_latlon.map((p) => p.km ?? 0),
       line: { color: '#22d3ee', width: 3 },
       hovertemplate: '<b>AIS / GPX</b><br>Time: %{x}<br>Pos: %{y:.3f} km<extra></extra>',
     });
@@ -89,13 +89,13 @@ export default function FibrePlot({ data, hoveredPointIndex, onHoverPoint }: Fib
           hovermode: 'closest',
           legend: { x: 0, y: 1, bgcolor: 'rgba(15, 23, 42, 0.5)', bordercolor: 'rgba(148, 163, 184, 0.3)' },
           xaxis: {
-            title: 'Time (UTC)',
+            title: { text: 'Time (UTC)' },
             gridcolor: '#1e293b',
             rangeselector: { bgcolor: 'rgba(59,130,246,0.2)' },
             rangeslider: { visible: true },
           },
           yaxis: {
-            title: 'Position along fibre (km)',
+            title: { text: 'Position along fibre (km)' },
             gridcolor: '#1e293b',
           },
           margin: { l: 60, r: 30, t: 40, b: 60 },
@@ -104,8 +104,8 @@ export default function FibrePlot({ data, hoveredPointIndex, onHoverPoint }: Fib
         config={{ responsive: true, displaylogo: false }}
         style={{ width: '100%', height: '480px' }}
         useResizeHandler
-        onClick={(_, points) => {
-          const first = points?.points?.[0];
+        onClick={(event) => {
+          const first = event.points?.[0];
           if (first) onHoverPoint?.(first.pointIndex ?? null);
         }}
       />
